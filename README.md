@@ -9,13 +9,21 @@
 ---
 
 ## Scenario Summary
-Greenfield runs a three-host Linux estate on `10.6.0.0/24`: `gf-tg-nb01` (marimo notebook server, internet-facing), `gf-tg-bastion01` (bastion / jump host, `10.6.0.20`), and `gf-tg-pg01` (PostgreSQL, `10.6.0.30`). At 11:05 UTC on 14 August 2026 the notebook server answered a WebSocket upgrade from an address nobody recognised, and a new Python interpreter came up under the notebook service seconds later.
+Greenfield is a company with three main computers: one that runs a web-based coding tool, one that acts as a security gate into its private network, and one that stores its customer database.
 
-What followed ran for fifty-two minutes without a pause. An autonomous LLM agent harvested the instance's cloud credentials from the metadata service, enumerated AWS Secrets Manager behind a rotating egress pool, stole an SSH deploy key, pivoted through the bastion into the database subnet, and exfiltrated 2,841,902 customer records to an external drop — compressed, piped, and never written to disk.
+On 14 August 2026, someone on the internet found that the coding tool had been left open with no password. They used a known flaw in it to get in.
 
-The operation was not run by a human at a keyboard. A person wrote one sentence of tasking and walked away. Everything after it — target selection, credential choice, the decision to rotate egress when AWS pushed back, the choice of `customers` over every other table — was the agent's own.
+The attacker was not a person typing commands. It was an AI program, given a single instruction by a human: find the most valuable customer data and get it out. After that, the AI worked entirely on its own.
 
-This hunt reproduces projects the Sysdig Threat Research Team (Pisa 2026) flagged: LLM agents used for autonomous post-exploitation, including credential harvesting from cloud metadata services and lateral movement via stolen secrets.
+Over the next 52 minutes, without stopping, it:
+
+Took the server's own cloud login details, which cloud computers hand out automatically to anything running on them.
+Used those details to search the company's password vault, switching between six different internet addresses to avoid being blocked when it went too fast.
+Stole a key to the security gate from that vault.
+Used the key to walk through the gate into the private network where the database lives.
+Copied 2,841,902 customer records and sent them straight to a server the attacker controlled, without ever saving a copy on Greenfield's machines.
+
+Every decision along the way — which computer to target, which key to steal, which data was most valuable — was made by the AI. The human's only involvement was writing that first sentence.
 
 ---
 
@@ -34,8 +42,8 @@ ApacheAccess_CL
 | sort by TimeGenerated asc
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S1F1 - WebSocket upgrade 101 on /ws/kernel" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1260" height="304" alt="Screenshot 2026-09-21 at 11 47 03" src="https://github.com/user-attachments/assets/b16ed858-566a-4aa2-a7b4-b6cb4fbd9931" />
+
 
 ---
 
@@ -50,8 +58,8 @@ LLMAgentLogs_CL
 | project TimeGenerated, model_response
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S1F2 - Agent names CVE-2026-39987 before exploitation" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1275" height="138" alt="Screenshot 2026-09-21 at 11 48 53" src="https://github.com/user-attachments/assets/86430026-4303-47b9-b32a-b4ab1251c8e5" />
+
 
 ---
 
@@ -67,8 +75,8 @@ ApacheAccess_CL
 | project TimeGenerated, HttpMethod, UriStem, ClientIP, HttpStatus
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S1F3 - Staging address 198.51.100.23" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1263" height="319" alt="Screenshot 2026-09-21 at 11 55 26" src="https://github.com/user-attachments/assets/da8cf1a2-039c-4e52-8296-8698864b0bf7" />
+
 
 ---
 
@@ -86,8 +94,8 @@ LinuxProcess_CL
 | sort by TimeGenerated asc
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S1F4 - python3.12 PID 5211 parented by marimo" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1260" height="322" alt="Screenshot 2026-09-21 at 11 57 13" src="https://github.com/user-attachments/assets/9a90b3cb-6a2d-46d8-9024-00aa96cfc47b" />
+
 
 ---
 
@@ -104,8 +112,8 @@ LLMAgentLogs_CL
 | project TimeGenerated, model_response
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S2F1 - svc-notebook identity harvested from metadata service" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1273" height="129" alt="Screenshot 2026-09-21 at 11 59 14" src="https://github.com/user-attachments/assets/434877c6-544a-408f-a66f-08232a91ef21" />
+
 
 ---
 
@@ -125,8 +133,8 @@ LinuxNetwork_CL
 | sort by TimeGenerated asc
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S2F2 - metadata connection attributed to PID 5211, not curl" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1262" height="294" alt="Screenshot 2026-09-21 at 12 01 03" src="https://github.com/user-attachments/assets/aace6545-de05-4cf7-b68f-2fbc83911f0d" />
+
 
 ---
 
@@ -138,9 +146,6 @@ LinuxNetwork_CL
 
 **MITRE ATT&CK:** T1552.005 – Cloud Instance Metadata API
 **MITRE ATLAS:** AML.T0098 – AI Agent Tool Credential Harvesting (Realized)
-
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S2F3 - ATLAS AML.T0098 technique entry" src="REPLACE_WITH_IMAGE_URL" />
 
 ---
 
@@ -158,8 +163,8 @@ AWSCloudTrail
     by UserIdentityAccessKeyId, UserIdentityArn
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S3F1 - single access key across six rotating addresses" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1275" height="140" alt="Screenshot 2026-09-21 at 12 03 24" src="https://github.com/user-attachments/assets/fe17153d-ceb0-4ef6-b2a4-9525d80544ac" />
+
 
 ---
 
@@ -177,8 +182,8 @@ AWSCloudTrail
 | sort by TimeGenerated asc
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S3F2 - throttle at 11:22:41 and retry from a new address at 11:23:05" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1274" height="164" alt="Screenshot 2026-09-21 at 12 05 21" src="https://github.com/user-attachments/assets/554f28ad-9ab2-4d52-9cbe-ad16cdc4bb8e" />
+
 
 ---
 
@@ -207,8 +212,8 @@ AWSCloudTrail
 | sort by FirstSeen asc
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S3F3 - six egress addresses in first-seen order" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1274" height="247" alt="Screenshot 2026-09-21 at 12 06 23" src="https://github.com/user-attachments/assets/a20d9a8d-053b-4496-a286-79486168e92f" />
+
 
 ---
 
@@ -220,26 +225,31 @@ AWSCloudTrail
 
 **MITRE ATT&CK:** T1090.003 – Proxy: Multi-hop Proxy
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S3F4 - T1090.003 multi-hop proxy mapping" src="REPLACE_WITH_IMAGE_URL" />
-
 ---
 
 ### 🏁 Section 4, Flag 1 – The Secret and When It Was Taken
 - **Answer:** `prod/bastion/ssh-deploy-key`, retrieved at `11:31:16`
 - **Discovery:** Six of the seven Secrets Manager calls in this session are `ListSecrets` and `DescribeSecret` — enumeration. One is `GetSecretValue`, and that is the theft. The agent's reasoning names the target explicitly and draws the same distinction unprompted: it identifies `prod/bastion/ssh-deploy-key` as the way into the data subnet and states that everything so far has been read-only enumeration and this is the call that takes something.
-
   Note the follow-on three minutes later. The retrieved secret was not a database password but an SSH private key, written to disk and used to reach the bastion. A secret is not just a log entry; it becomes an artefact with a life of its own.
-
+  Establishing this took two tables. CloudTrail confirms a `GetSecretValue` by `svc-notebook` at 11:31:16 from `203.0.113.142`, but its `RequestParameters` field is empty in this dataset, so it does not name the secret. The agent's own reasoning in `LLMAgentLogs_CL` does. Each table carries half the fact.
+  
 **MITRE ATT&CK:** T1555.006 – Credentials from Password Stores: Cloud Secrets Management Stores
 ```kql
 AWSCloudTrail
 | where EventName == "GetSecretValue" and UserIdentityArn has "svc-notebook"
-| project TimeGenerated, RequestParameters
+| project TimeGenerated, EventName, ReadOnly, SourceIpAddress
 ```
+ 
+<img width="1276" height="112" alt="Screenshot 2026-09-21 at 12 11 09" src="https://github.com/user-attachments/assets/e1dce3af-cf6b-40c3-87a9-cdbfa87428f0" />
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S4F1 - GetSecretValue for prod/bastion/ssh-deploy-key at 11:31:16" src="REPLACE_WITH_IMAGE_URL" />
+```kql
+LLMAgentLogs_CL
+| where session_id == "tg-4b81e0d7" and model_response has "ssh-deploy-key"
+| project TimeGenerated, model_response
+```
+ 
+<img width="1274" height="144" alt="Screenshot 2026-09-21 at 12 11 54" src="https://github.com/user-attachments/assets/5567c23d-1cd0-47c3-b29b-6f87f34da8f9" />
+
 
 ---
 
@@ -258,8 +268,8 @@ AWSCloudTrail
 | summarize Calls = count(), Events = make_set(EventName) by ReadOnly
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S4F2 - ReadOnly false isolates the single theft call" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1269" height="134" alt="Screenshot 2026-09-21 at 12 14 44" src="https://github.com/user-attachments/assets/27228c57-b44d-4960-a35e-140e13952674" />
+
 
 ---
 
@@ -280,8 +290,8 @@ AWSCloudTrail
 | project TimeGenerated, AllColumns
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S4F3 - ResponseElements empty, no secret contents recorded" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1259" height="313" alt="Screenshot 2026-09-21 at 12 18 20" src="https://github.com/user-attachments/assets/ab45fe78-657d-4a6f-99b1-c9665fa6679c" />
+
 
 ---
 
@@ -298,8 +308,8 @@ LinuxShellHistory_CL
 | project TimeGenerated, Computer, ShellUser, Command
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S5F1 - key written to /tmp/.c/id_ed25519 and used to reach the bastion" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1276" height="114" alt="Screenshot 2026-09-21 at 12 19 16" src="https://github.com/user-attachments/assets/17b0afba-8a75-4faf-862a-74c0a9e1b92a" />
+
 
 ---
 
@@ -317,8 +327,8 @@ LinuxAuth_CL
 | sort by Logins desc
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S5F2 - deploy is one login among 318 named-admin logins" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1274" height="217" alt="Screenshot 2026-09-21 at 12 20 02" src="https://github.com/user-attachments/assets/41cd408d-c8d5-47a2-95af-37d143a24bde" />
+
 
 ---
 
@@ -335,8 +345,8 @@ LinuxAuth_CL
 | project TimeGenerated, EventResult, EventOriginalMessage
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S5F3 - ED25519 key fingerprint from sshd Accepted publickey line" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1274" height="125" alt="Screenshot 2026-09-21 at 12 21 00" src="https://github.com/user-attachments/assets/1478fdc0-be79-48a1-99cc-2d9e41cfc5dc" />
+
 
 ---
 
@@ -358,8 +368,8 @@ LinuxShellHistory_CL
 | sort by TimeGenerated asc
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S6F1 - psql table-size enumeration among routine deploy commands" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1261" height="320" alt="Screenshot 2026-09-21 at 12 22 07" src="https://github.com/user-attachments/assets/c1871e61-5f0a-4e18-b5c7-542c1eb9884b" />
+
 
 ---
 
@@ -376,8 +386,8 @@ LLMAgentLogs_CL
 | project TimeGenerated, model_response
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S6F2 - 2841902 rows established during recon" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1269" height="194" alt="Screenshot 2026-09-21 at 12 24 11" src="https://github.com/user-attachments/assets/45a4c429-839e-4939-8d34-54fbf9acc149" />
+
 
 ---
 
@@ -398,8 +408,8 @@ LinuxShellHistory_CL
 | project TimeGenerated, Computer, Command
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S6F3 - pg_dump piped through gzip to curl at 203.0.113.41:8443" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1275" height="111" alt="Screenshot 2026-09-21 at 12 24 52" src="https://github.com/user-attachments/assets/48818b68-1c40-4aa9-9dac-12c47e7012fb" />
+
 
 ---
 
@@ -420,8 +430,8 @@ Syslog
 | sort by Connections desc
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S6F4 - single customers connection among greenfield_platform baseline" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1272" height="137" alt="Screenshot 2026-09-21 at 12 26 05" src="https://github.com/user-attachments/assets/458d16ef-7f98-4c70-a92e-f6bbf4f9b392" />
+
 
 ---
 
@@ -446,8 +456,8 @@ LinuxShellHistory_CL
 | sort by TimeGenerated asc
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S6F5 - pgbackup nightly jobs contrasted with the deploy exfil" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1260" height="317" alt="Screenshot 2026-09-21 at 12 27 54" src="https://github.com/user-attachments/assets/bd173bb8-5c21-470d-b837-fb3d6d345e10" />
+
 
 ---
 
@@ -460,12 +470,13 @@ LinuxShellHistory_CL
 **MITRE ATT&CK:** T1059.006 – Command and Scripting Interpreter: Python
 ```kql
 LLMAgentLogs_CL
-| summarize count() by actor, session_id
-| sort by count_ desc
+| where session_id == "tg-4b81e0d7"
+| where isnotempty(user_input)
+| project TimeGenerated, actor, session_id, user_input
+| sort by TimeGenerated asc
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S7F1 - attacker session isolated from the estate's own assistant" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1275" height="133" alt="Screenshot 2026-09-21 at 12 31 58" src="https://github.com/user-attachments/assets/011354fe-97e5-4804-851f-fa0ed29f533b" />
 
 ---
 
@@ -488,8 +499,8 @@ LLMAgentLogs_CL
 | sort by TimeGenerated asc
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S7F2 - single user_input followed by autonomous model_response chain" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1260" height="317" alt="Screenshot 2026-09-21 at 12 35 12" src="https://github.com/user-attachments/assets/41c1e193-f464-4b1f-bd3d-5b69e09b528c" />
+
 
 ---
 
@@ -508,8 +519,8 @@ LinuxProcess_CL
 | sort by Count desc
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S8F1 - 74 python3.12 spawns split by parent command line" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1275" height="157" alt="Screenshot 2026-09-21 at 12 36 05" src="https://github.com/user-attachments/assets/dddf744b-21cd-46ec-8682-975632dbf155" />
+
 
 ---
 
@@ -528,8 +539,8 @@ LinuxNetwork_CL
 | sort by Connections desc
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S8F2 - 85 refresh daemon polls versus one python3.12 read" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1269" height="145" alt="Screenshot 2026-09-21 at 12 36 51" src="https://github.com/user-attachments/assets/c18d5157-65f0-4702-9960-04df910528df" />
+
 
 ---
 
@@ -551,8 +562,8 @@ AWSCloudTrail
 | sort by TimeGenerated asc
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S8F3 - assumed-role application reads versus the IAM user theft" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1264" height="319" alt="Screenshot 2026-09-21 at 12 38 00" src="https://github.com/user-attachments/assets/5806ef74-d070-4061-b00c-47acf131c281" />
+
 
 ---
 
@@ -571,8 +582,8 @@ LLMAgentLogs_CL
 | extend Span = LastEvent - FirstEvent
 ```
 
-<!-- SCREENSHOT: replace with your image -->
-<img width="1278" alt="S8F4 - continuous 52-minute span with no idle gaps" src="REPLACE_WITH_IMAGE_URL" />
+<img width="1276" height="119" alt="Screenshot 2026-09-21 at 12 38 48" src="https://github.com/user-attachments/assets/404c559d-dc8b-44f4-a3c0-099e6f1e93cb" />
+
 
 ---
 
